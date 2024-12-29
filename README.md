@@ -6,10 +6,14 @@ Single-header C++17 library for single-threaded socket based REST API communicat
 * Header-only
 * Non-blocking
 * SSL/TLS using OpenSSL
-* **not** thread-safe.
 
 ## Requirements
 * OpenSSL
+
+## Limitations
+* **not** thread-safe.
+* Does **not** handle chunked encoding, or anything else that isn't completely basic http.
+* I can't imagine there is any use case for this apart from trading APIs like Kalshi and Coinbase. For anything else go use [restclient-cpp](https://github.com/mrtazz/restclient-cpp).
 
 ## Usage
 
