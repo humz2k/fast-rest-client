@@ -1,7 +1,9 @@
 #ifndef _FASTREST_FASTREST_HPP_
 #define _FASTREST_FASTREST_HPP_
 
+#include <algorithm>
 #include <iostream>
+#include <queue>
 #include <stdexcept>
 #include <string>
 
@@ -24,10 +26,130 @@ class SocketClientException : public std::runtime_error {
         : std::runtime_error(msg) {}
 };
 
-template <bool verbose = false> class SocketClient {
+struct HttpResponse {
+    int status;
+    std::string content;
+};
+
+template <class Handler> class HttpParser {
+  private:
+    std::string m_buffer = "";
+    int m_parse_status = 0;
+
+    int m_current_status_code = 0;
+    int m_current_content_length = 0;
+    bool m_connection_alive = true;
+    // std::string m_current_content = "";
+
+    Handler& m_handler;
+    std::queue<HttpResponse> m_responses;
+
+    int parse_int(std::string::iterator start, std::string::iterator end) {
+        int out = 0;
+        for (auto it = start; it != end; ++it) {
+            out *= 10;
+            out += (*it) - '0';
+        }
+        return out;
+    }
+
+    void check_status_code() {
+        if (m_parse_status != 0)
+            return;
+        const size_t pos = m_buffer.find("HTTP/1.1 ");
+        if (pos == std::string::npos)
+            return;
+        auto status_start = m_buffer.begin() + pos + 9;
+        auto status_end = std::find(status_start, m_buffer.end(), ' ');
+        if (status_end == m_buffer.end())
+            return;
+
+        m_current_status_code = parse_int(status_start, status_end);
+        m_parse_status++;
+    }
+
+    void check_connection() {
+        if (m_parse_status != 1)
+            return;
+        const size_t pos = m_buffer.find("Connection: ");
+        if (pos == std::string::npos)
+            return;
+        auto connection_start = m_buffer.begin() + pos + 12;
+        auto connection_end = std::find(connection_start, m_buffer.end(), '\r');
+        if (connection_end == m_buffer.end())
+            return;
+        if (std::string(connection_start, connection_end) != "keep-alive") {
+            m_connection_alive = false;
+        }
+        m_parse_status++;
+    }
+
+    void check_content_length() {
+        if (m_parse_status != 2)
+            return;
+        const size_t pos = m_buffer.find("Content-Length: ");
+        if (pos == std::string::npos)
+            return;
+        auto content_length_start = m_buffer.begin() + pos + 16;
+        auto content_length_end =
+            std::find(content_length_start, m_buffer.end(), '\r');
+        if (content_length_end == m_buffer.end())
+            return;
+        m_current_content_length =
+            parse_int(content_length_start, content_length_end);
+        m_parse_status++;
+    }
+
+    void check_content() {
+        if (m_parse_status != 3)
+            return;
+        const size_t start = m_buffer.find("\r\n\r\n");
+        if (start == std::string::npos)
+            return;
+        const size_t length_now = m_buffer.length() - (start + 4);
+        if (length_now >= m_current_content_length) {
+            auto content_start = m_buffer.begin() + start + 4;
+            auto content_end =
+                m_buffer.begin() + start + 4 + m_current_content_length;
+            m_buffer = std::string(content_end, m_buffer.end());
+            m_responses.push(
+                {.status = m_current_status_code,
+                 .content = std::string(content_start, content_end)});
+            m_parse_status = 0;
+        }
+    }
+
+  public:
+    explicit HttpParser(Handler& handler) : m_handler(handler) {}
+
+    void update(const std::string& buf) {
+        if (buf.length() == 0)
+            return;
+        m_buffer += buf;
+        check_status_code();
+        check_connection();
+        check_content_length();
+        check_content();
+    }
+
+    void poll() {
+        if (m_responses.size() > 0) {
+            m_handler(m_responses.front());
+            m_responses.pop();
+        }
+    }
+
+    bool connection_alive() const { return m_connection_alive; }
+
+    void set_connected() { m_connection_alive = true; }
+};
+
+template <class Handler, bool verbose = false> class SocketClient {
   private:
     // the url of the host we are making requests to
     std::string m_host;
+    long m_port;
+    HttpParser<Handler> m_parser;
 
     // socket
     int m_sockfd = -1;
@@ -54,8 +176,26 @@ template <bool verbose = false> class SocketClient {
         return out;
     }
 
-  public:
-    SocketClient(const std::string host, const long port = 443) : m_host(host) {
+    std::string
+    construct_http_request(const std::string& method, const std::string& path,
+                           const std::string& host,
+                           const std::string& content = "",
+                           const std::string& extra_headers = "") const {
+        auto out = method + " " + path +
+                   " HTTP/1.1\r\n"
+                   "Host: " +
+                   host +
+                   "\r\n"
+                   "Accept: */*\r\nConnection: keep-alive\r\n" +
+                   extra_headers;
+        if (content.size() == 0) {
+            return out + "\r\n";
+        }
+        return out + "Content-Length: " + std::to_string(content.size()) +
+               "\r\n\r\n" + content;
+    }
+
+    void connect() {
         // reserve 1000 bytes for the out thingy
         m_out.reserve(1000);
 
@@ -66,7 +206,7 @@ template <bool verbose = false> class SocketClient {
         hints.ai_socktype = SOCK_STREAM;
         hints.ai_protocol = IPPROTO_TCP;
 
-        if (int rc = getaddrinfo(host.c_str(), std::to_string(port).c_str(),
+        if (int rc = getaddrinfo(m_host.c_str(), std::to_string(m_port).c_str(),
                                  &hints, &addrs);
             rc != 0) {
             throw SocketClientException(std::string(gai_strerror(rc)));
@@ -91,7 +231,7 @@ template <bool verbose = false> class SocketClient {
             }
 
             // try and connect
-            if (connect(m_sockfd, addr->ai_addr, addr->ai_addrlen) == 0)
+            if (::connect(m_sockfd, addr->ai_addr, addr->ai_addrlen) == 0)
                 break;
 
             close(m_sockfd);
@@ -109,7 +249,7 @@ template <bool verbose = false> class SocketClient {
         if (!m_ssl)
             throw SocketClientException("Failed to create SSL.");
 
-        SSL_set_tlsext_host_name(m_ssl, host.c_str());
+        SSL_set_tlsext_host_name(m_ssl, m_host.c_str());
 
         m_sslsock = SSL_get_fd(m_ssl);
         SSL_set_fd(m_ssl, m_sockfd);
@@ -126,6 +266,24 @@ template <bool verbose = false> class SocketClient {
         freeaddrinfo(addrs);
 
         fcntl(m_sockfd, F_SETFL, O_NONBLOCK);
+    }
+
+    void disconnect() {
+        if (!(m_sockfd < 0))
+            close(m_sockfd);
+        if (m_ctx)
+            SSL_CTX_free(m_ctx);
+        if (m_ssl) {
+            SSL_shutdown(m_ssl);
+            SSL_free(m_ssl);
+        }
+    }
+
+  public:
+    SocketClient(Handler& handler, const std::string host,
+                 const long port = 443)
+        : m_host(host), m_parser(handler), m_port(port) {
+        connect();
     }
 
     SocketClient(const SocketClient&) = delete;
@@ -192,6 +350,51 @@ template <bool verbose = false> class SocketClient {
         return sent;
     }
 
+    int get(const std::string& path, const std::string& extra_headers = "") {
+        return send_request(
+            construct_http_request("GET", path, m_host, "", extra_headers));
+    }
+
+    int post(const std::string& path, const std::string& content_type,
+             const std::string& content,
+             const std::string& extra_headers = "") {
+        return send_request(construct_http_request(
+            "POST", path, m_host, content,
+            extra_headers + "Content-Type: " + content_type + "\r\n"));
+    }
+
+    int put(const std::string& path, const std::string& content_type,
+            const std::string& content, const std::string& extra_headers = "") {
+        return send_request(construct_http_request(
+            "PUT", path, m_host, content,
+            extra_headers + "Content-Type: " + content_type + "\r\n"));
+    }
+
+    int patch(const std::string& path, const std::string& content_type,
+              const std::string& content,
+              const std::string& extra_headers = "") {
+        return send_request(construct_http_request(
+            "PATCH", path, m_host, content,
+            extra_headers + "Content-Type: " + content_type + "\r\n"));
+    }
+
+    int del(const std::string& path, const std::string& extra_headers = "") {
+        return send_request(
+            construct_http_request("DEL", path, m_host, "", extra_headers));
+    }
+
+    int head(const std::string& path, const std::string& extra_headers = "") {
+        return send_request(
+            construct_http_request("HEAD", path, m_host, "", extra_headers));
+    }
+
+    int options(const std::string& path,
+                const std::string& extra_headers = "") {
+        return send_request(
+            construct_http_request("OPTIONS", path, m_host, "", extra_headers));
+    }
+
+    // this doesn't update the parser when you call it!
     std::string read_buffer(const size_t read_size = 100) {
         size_t read = 0;
         m_out.clear();
@@ -209,16 +412,22 @@ template <bool verbose = false> class SocketClient {
         return m_out;
     }
 
-    ~SocketClient() {
-        if (!(m_sockfd < 0))
-            close(m_sockfd);
-        if (m_ctx)
-            SSL_CTX_free(m_ctx);
-        if (m_ssl) {
-            SSL_shutdown(m_ssl);
-            SSL_free(m_ssl);
+    void poll() {
+        m_parser.update(read_buffer());
+        m_parser.poll();
+        if (!m_parser.connection_alive()) {
+            std::cout << "disconnected" << std::endl;
+            disconnect();
+            connect();
+            m_parser.set_connected();
         }
     }
+
+    HttpParser<Handler>& parser() { return m_parser; }
+
+    const HttpParser<Handler>& parser() const { return m_parser; }
+
+    ~SocketClient() { disconnect(); }
 };
 
 } // namespace fastrest

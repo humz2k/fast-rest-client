@@ -1,6 +1,6 @@
 # fast-rest-client
 
-Single-header C++17 library for single-threaded socket based REST API communication over HTTPS. This is pretty much just a wrapper over sockets/ssl, but has been useful to me when writing clients for apis like Coinbase and Kalshi.
+Single-header C++17 library for single-threaded socket based REST API communication over HTTPS. This is pretty much just a wrapper over sockets/ssl, but has been useful to me when writing clients for apis like Coinbase and Kalshi. The intended use case is when you are going to be sending lots of non-blocking requests over a connection you want to keep alive.
 
 ## Features
 * Header-only
@@ -23,27 +23,32 @@ Sends a request and then polls for a response for 1 second.
 #include <iostream>
 #include <string>
 
+struct Handler {
+    void operator()(fastrest::HttpResponse resp) {
+        std::cout << "Received response from the server:" << std::endl;
+        std::cout << " - status = " << resp.status << std::endl;
+        std::cout << " - content = " << resp.content << std::endl;
+    }
+};
+
 int main() {
-    fastrest::SocketClient client("api.example.com");
+    const std::string host = "api.elections.kalshi.com";
+    Handler handler;
+    fastrest::SocketClient<Handler> client(handler, host);
 
-    std::string request = "GET /path HTTP/1.1\r\n"
-                          "Host: api.example.com\r\n"
-                          "Accept: */*\r\n"
-                          "Connection: keep-alive\r\n\r\n";
+    client.get("/trade-api/v2/exchange/status");
 
-    client.send_request(request);
-
-    auto start = std::chrono::system_clock::now();
+    auto start = std::chrono::high_resolution_clock::now();
 
     while (true) {
-        auto out = client.read_buffer();
-        if (out.length() > 0) {
-            std::cout << out << std::endl;
-        }
+        client.poll();
 
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now() - start)
-                .count() > 1000)
+        auto end = std::chrono::high_resolution_clock::now();
+
+        auto total_time =
+            std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+                .count();
+        if (total_time > 1000)
             break;
     }
     return 0;
@@ -52,36 +57,36 @@ int main() {
 
 ## Documentation
 
-### SocketClient
-
-#### Constructor
+### Basic request types
 ```c++
-fastrest::SocketClient(const std::string host, const long port = 443);
+client.get("/path/to/resource");
+client.post("/path/to/resource", "application/json", "{\"key\":\"value\"}");
+client.put("/path/to/resource", "application/json", "{\"key\":\"updated_value\"}");
+client.patch("/path/to/resource", "application/json", "{\"key\":\"patched_value\"}");
+client.del("/path/to/resource");
+client.head("/path/to/resource");
+client.options("/path/to/resource");
 ```
-* *host*: The server hostname (e.g., `api.example.com`).
-* *port*: The port to connect to (default: 443).
 
-#### Methods
-
-**send_request**: Sends a packet to the server.
+### Polling for responses
+We create a functor that will handle responses from the server.
 ```c++
-int fastrest::SocketClient::send_request(const std::string& req);
+struct HttpResponseHandler {
+    void operator()(fastrest::HttpResponse response){
+        // handle response
+    }
+};
 ```
-* *req* The raw packet string.
-* *Returns*: The number of bytes sent.
-
-**read_buffer**: Reads bytes from the receive buffer.
+Then we provide this to the SocketClient's constructor.
 ```c++
-std::string fastrest::SocketClient::read_buffer(const size_t read_size = 100);
+HttpResponseHandler handler;
+fastrest::SocketClient<HttpResponseHandler> client(handler, host);
 ```
-* *read_size*: Size to read from the buffer at once (i.e., if there is 250 bytes in the buffer, with a read_size of 100, there will be 3 read operations).
-* *Returns*: Whatever was in the buffer as a string.
-
-#### Error Handling
-Kind of adhoc, will throw a `fastrest::SocketClientException` if there is an error but see `include/fastrest/fastrest.hpp` for specifics.
-
-#### Logging
-Again, adhoc, but set the template parameter `verbose` of `fastrest::SocketClient` to `true` for some basic logging to `stdout`.
-
-## Performance
-On a M1 Mac, I get call site latencies of <100 microseconds for `send_packet`, ~300 nanoseconds for `read_buffer` when the buffer is empty, and <100 microseconds for `read_buffer` when the buffer is full. YMMV.
+Then poll for responses.
+```c++
+// send requests...
+while (true) {
+    client.poll();
+}
+```
+The client will call `HttpResponseHandler::operator()` if there is a packet to be handled when you call `client.poll()`.
