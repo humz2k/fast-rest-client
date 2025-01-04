@@ -148,8 +148,8 @@ template <class Handler, bool verbose = false> class SocketClient {
   private:
     // the url of the host we are making requests to
     std::string m_host;
-    long m_port;
     HttpParser<Handler> m_parser;
+    long m_port;
 
     // socket
     int m_sockfd = -1;
@@ -282,7 +282,7 @@ template <class Handler, bool verbose = false> class SocketClient {
   public:
     SocketClient(Handler& handler, const std::string host,
                  const long port = 443)
-        : m_host(host), m_parser(handler), m_port(port) {
+        : m_host(host), m_port(port), m_parser(handler) {
         connect();
     }
 
