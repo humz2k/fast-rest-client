@@ -3,12 +3,12 @@
 
 #include <smallstring/smallstring.hpp>
 
+#include <boost/circular_buffer.hpp>
 #include <boost/pool/pool_alloc.hpp>
 
 #include <algorithm>
 #include <iostream>
 #include <memory>
-#include <queue>
 #include <stdexcept>
 #include <string>
 
@@ -42,7 +42,7 @@ struct HttpResponse {
 
 template <class Handler> class HttpParser {
   private:
-    smallstring::Buffer<std::vector<char>> m_buffer;
+    smallstring::Buffer<std::vector<char>> m_buffer{4096};
     int m_parse_status = 0;
 
     int m_current_status_code = 0;
@@ -50,7 +50,13 @@ template <class Handler> class HttpParser {
     bool m_connection_alive = true;
 
     Handler& m_handler;
-    std::queue<HttpResponse> m_responses;
+
+    static constexpr std::size_t RESPONSE_BUFFER_CAPACITY = 1024;
+
+    // Replace std::queue with boost::circular_buffer
+    boost::circular_buffer<HttpResponse> m_responses{RESPONSE_BUFFER_CAPACITY};
+
+    // std::queue<HttpResponse> m_responses;
 
     // hacky way to go from str->int
     int parse_int(const char* start, const char* end) const {
@@ -122,8 +128,9 @@ template <class Handler> class HttpParser {
             auto content_start = m_buffer.begin() + start + 4;
             auto content_end =
                 m_buffer.begin() + start + 4 + m_current_content_length;
-            m_responses.push({.status = m_current_status_code,
-                              .content = string(content_start, content_end)});
+            m_responses.push_back(
+                {.status = m_current_status_code,
+                 .content = string(content_start, content_end)});
             m_buffer.pop(start + 4 + m_current_content_length);
             m_parse_status = 0;
         }
@@ -145,7 +152,7 @@ template <class Handler> class HttpParser {
     void poll() {
         if (m_responses.size() > 0) {
             m_handler(m_responses.front());
-            m_responses.pop();
+            m_responses.pop_front();
         }
     }
 
@@ -160,7 +167,9 @@ template <class Handler, bool verbose = false> class SocketClient {
     std::string m_host;
     HttpParser<Handler> m_parser;
     long m_port;
-    smallstring::Buffer<std::vector<char>> m_buff{2048};
+
+    // for caching requests
+    smallstring::Buffer<std::vector<char>> m_buff{4096};
 
     // socket
     int m_sockfd = -1;
