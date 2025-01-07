@@ -1,0 +1,3 @@
+[submodule "ext/small-string-buffer"]
+	path = ext/small-string-buffer
+	url = https://github.com/humz2k/small-string-buffer.git

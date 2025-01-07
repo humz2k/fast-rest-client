@@ -9,7 +9,9 @@ find_package(OpenSSL REQUIRED)
 
 add_library(fastrest INTERFACE)
 
-target_link_libraries(fastrest INTERFACE OpenSSL::SSL)
+add_subdirectory(ext/small-string-buffer)
+
+target_link_libraries(fastrest INTERFACE OpenSSL::SSL smallstring)
 target_include_directories(fastrest INTERFACE include)
 
 if (${PROJECT_IS_TOP_LEVEL})

@@ -1,6 +1,8 @@
 #ifndef _FASTREST_FASTREST_HPP_
 #define _FASTREST_FASTREST_HPP_
 
+#include <smallstring/smallstring.hpp>
+
 #include <algorithm>
 #include <iostream>
 #include <queue>
@@ -111,10 +113,10 @@ template <class Handler> class HttpParser {
             auto content_start = m_buffer.begin() + start + 4;
             auto content_end =
                 m_buffer.begin() + start + 4 + m_current_content_length;
-            m_buffer = std::string(content_end, m_buffer.end());
             m_responses.push(
                 {.status = m_current_status_code,
                  .content = std::string(content_start, content_end)});
+            m_buffer = std::string(content_end, m_buffer.end());
             m_parse_status = 0;
         }
     }
