@@ -3,8 +3,11 @@
 
 #include <smallstring/smallstring.hpp>
 
+#include <boost/pool/pool_alloc.hpp>
+
 #include <algorithm>
 #include <iostream>
+#include <memory>
 #include <queue>
 #include <stdexcept>
 #include <string>
@@ -22,6 +25,10 @@
 
 namespace fastrest {
 
+// messages are returned as a fastrest::string which uses a pool allocator
+using string = std::basic_string<char, std::char_traits<char>,
+                                 boost::fast_pool_allocator<char>>;
+
 class SocketClientException : public std::runtime_error {
   public:
     explicit SocketClientException(const std::string& msg)
@@ -29,24 +36,24 @@ class SocketClientException : public std::runtime_error {
 };
 
 struct HttpResponse {
-    int status;
-    std::string content;
+    int status;     // status code
+    string content; // json content (as a fastrest::string)
 };
 
 template <class Handler> class HttpParser {
   private:
-    std::string m_buffer = "";
+    smallstring::Buffer<std::vector<char>> m_buffer;
     int m_parse_status = 0;
 
     int m_current_status_code = 0;
     int m_current_content_length = 0;
     bool m_connection_alive = true;
-    // std::string m_current_content = "";
 
     Handler& m_handler;
     std::queue<HttpResponse> m_responses;
 
-    int parse_int(std::string::iterator start, std::string::iterator end) {
+    // hacky way to go from str->int
+    int parse_int(const char* start, const char* end) const {
         int out = 0;
         for (auto it = start; it != end; ++it) {
             out *= 10;
@@ -80,7 +87,9 @@ template <class Handler> class HttpParser {
         auto connection_end = std::find(connection_start, m_buffer.end(), '\r');
         if (connection_end == m_buffer.end())
             return;
-        if (std::string(connection_start, connection_end) != "keep-alive") {
+        if (std::string_view(connection_start,
+                             (connection_end - connection_start)) !=
+            "keep-alive") {
             m_connection_alive = false;
         }
         m_parse_status++;
@@ -113,10 +122,9 @@ template <class Handler> class HttpParser {
             auto content_start = m_buffer.begin() + start + 4;
             auto content_end =
                 m_buffer.begin() + start + 4 + m_current_content_length;
-            m_responses.push(
-                {.status = m_current_status_code,
-                 .content = std::string(content_start, content_end)});
-            m_buffer = std::string(content_end, m_buffer.end());
+            m_responses.push({.status = m_current_status_code,
+                              .content = string(content_start, content_end)});
+            m_buffer.pop(start + 4 + m_current_content_length);
             m_parse_status = 0;
         }
     }
@@ -124,10 +132,10 @@ template <class Handler> class HttpParser {
   public:
     explicit HttpParser(Handler& handler) : m_handler(handler) {}
 
-    void update(const std::string& buf) {
+    void update(const std::string_view& buf) {
         if (buf.length() == 0)
             return;
-        m_buffer += buf;
+        m_buffer.push(buf);
         check_status_code();
         check_connection();
         check_content_length();
@@ -152,6 +160,7 @@ template <class Handler, bool verbose = false> class SocketClient {
     std::string m_host;
     HttpParser<Handler> m_parser;
     long m_port;
+    smallstring::Buffer<std::vector<char>> m_buff{2048};
 
     // socket
     int m_sockfd = -1;
@@ -164,7 +173,7 @@ template <class Handler, bool verbose = false> class SocketClient {
     SSL* m_ssl = nullptr;
 
     // we keep this guy around so we dont do extra heap allocations
-    std::string m_out;
+    string m_out;
 
     // dumb way to print ssl errors
     std::string get_ssl_error() {
@@ -178,23 +187,29 @@ template <class Handler, bool verbose = false> class SocketClient {
         return out;
     }
 
-    std::string
-    construct_http_request(const std::string& method, const std::string& path,
+    template <std::size_t N>
+    std::string_view
+    construct_http_request(const char (&method)[N], const std::string& path,
                            const std::string& host,
                            const std::string& content = "",
-                           const std::string& extra_headers = "") const {
-        auto out = method + " " + path +
-                   " HTTP/1.1\r\n"
-                   "Host: " +
-                   host +
-                   "\r\n"
-                   "Accept: */*\r\nConnection: keep-alive\r\n" +
-                   extra_headers;
+                           const std::string& extra_headers = "") {
+        m_buff.clear();
+        m_buff.push(method);
+        m_buff.push(" ");
+        m_buff.push(path);
+        m_buff.push(" HTTP/1.1\r\nHost: ");
+        m_buff.push(host);
+        m_buff.push("\r\nAccept: */*\r\nConnection: keep-alive\r\n");
+        m_buff.push(extra_headers);
         if (content.size() == 0) {
-            return out + "\r\n";
+            m_buff.push("\r\n");
+            return m_buff.view();
         }
-        return out + "Content-Length: " + std::to_string(content.size()) +
-               "\r\n\r\n" + content;
+        m_buff.push("Content-Length: ");
+        m_buff.push(std::to_string(content.size()));
+        m_buff.push("\r\n\r\n");
+        m_buff.push(content);
+        return m_buff.view();
     }
 
     void connect() {
@@ -323,9 +338,9 @@ template <class Handler, bool verbose = false> class SocketClient {
     }
 
     // sends a request - forces the socket to fully send everything
-    int send_request(const std::string& req) {
-        const char* buf = req.c_str();
-        int to_send = req.size();
+    int send_request(const std::string_view& req) {
+        const char* buf = req.data();
+        int to_send = req.length();
         int sent = 0;
         while (to_send > 0) {
             const int len = SSL_write(m_ssl, buf + sent, to_send);
@@ -397,7 +412,7 @@ template <class Handler, bool verbose = false> class SocketClient {
     }
 
     // this doesn't update the parser when you call it!
-    std::string read_buffer(const size_t read_size = 100) {
+    std::string_view read_buffer(const size_t read_size = 100) {
         size_t read = 0;
         m_out.clear();
         while (true) {
