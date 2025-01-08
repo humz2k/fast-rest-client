@@ -326,12 +326,7 @@ template <class Handler, bool verbose = false> class SocketClient {
     }
 
     SocketClient& operator=(SocketClient&& other) {
-        if (!(m_sockfd < 0))
-            close(m_sockfd);
-        if (m_ctx)
-            SSL_CTX_free(m_ctx);
-        if (m_ssl)
-            SSL_free(m_ssl);
+        disconnect();
 
         m_host = std::move(other.m_host);
         m_sockfd = other.m_sockfd;
