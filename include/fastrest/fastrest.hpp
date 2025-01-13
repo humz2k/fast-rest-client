@@ -46,7 +46,7 @@ template <class Handler> class HttpParser {
     int m_parse_status = 0;
 
     int m_current_status_code = 0;
-    int m_current_content_length = 0;
+    std::size_t m_current_content_length = 0;
     bool m_connection_alive = true;
 
     Handler& m_handler;
@@ -55,8 +55,6 @@ template <class Handler> class HttpParser {
 
     // Replace std::queue with boost::circular_buffer
     boost::circular_buffer<HttpResponse> m_responses{RESPONSE_BUFFER_CAPACITY};
-
-    // std::queue<HttpResponse> m_responses;
 
     // hacky way to go from str->int
     int parse_int(const char* start, const char* end) const {
@@ -165,8 +163,8 @@ template <class Handler, bool verbose = false> class SocketClient {
   private:
     // the url of the host we are making requests to
     std::string m_host;
-    HttpParser<Handler> m_parser;
     long m_port;
+    HttpParser<Handler> m_parser;
 
     // for caching requests
     smallstring::Buffer<std::vector<char>> m_buff{4096};
