@@ -137,7 +137,7 @@ template <class Handler> class HttpParser {
   public:
     explicit HttpParser(Handler& handler) : m_handler(handler) {}
 
-    void update(const std::string_view& buf) {
+    void update(std::string_view buf) {
         if (buf.length() == 0)
             return;
         m_buffer.push(buf);
@@ -340,7 +340,7 @@ template <class Handler, bool verbose = false> class SocketClient {
     }
 
     // sends a request - forces the socket to fully send everything
-    int send_request(const std::string_view& req) {
+    int send_request(std::string_view req) {
         const char* buf = req.data();
         int to_send = req.length();
         int sent = 0;
