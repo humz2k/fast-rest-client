@@ -415,9 +415,9 @@ template <class Handler, bool verbose = false> class SocketClient {
 
     // this doesn't update the parser when you call it!
     std::string_view read_buffer(const size_t read_size = 100) {
-        size_t read = 0;
         m_out.clear();
         while (true) {
+            size_t read = 0;
             const size_t original_size = m_out.size();
             m_out.resize(original_size + read_size);
             char* buf = &(m_out.data()[original_size]);
@@ -435,7 +435,6 @@ template <class Handler, bool verbose = false> class SocketClient {
         m_parser.update(read_buffer());
         m_parser.poll();
         if (!m_parser.connection_alive()) {
-            std::cout << "disconnected" << std::endl;
             disconnect();
             connect();
             m_parser.set_connected();
